@@ -24,10 +24,24 @@ MOODLE_URL = os.getenv(
 MOODLE_TOKEN = os.getenv("MOODLE_TOKEN")
 
 # Base de datos de cuentas Moodle por usuario de Telegram.
+#
+# En producción se utiliza PostgreSQL mediante DATABASE_URL (Supabase).
+# SQLite se conserva únicamente como respaldo para migrar instalaciones
+# antiguas que todavía tengan usuarios_moodle.db local.
 ARCHIVO_USUARIOS_MOODLE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "usuarios_moodle.db"
 )
+
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except Exception:
+    psycopg2 = None
+    RealDictCursor = None
+
 
 USUARIO_TELEGRAM_ACTUAL = ContextVar(
     "usuario_telegram_actual",
@@ -53,7 +67,7 @@ ULTIMA_RESPUESTA_MOODLE = None
 # CUENTAS MOODLE POR TELEGRAM
 # =========================================================
 
-def _conectar_usuarios_moodle():
+def _conectar_sqlite_usuarios_moodle():
     conexion = sqlite3.connect(
         ARCHIVO_USUARIOS_MOODLE,
         timeout=10
@@ -73,9 +87,100 @@ def _conectar_usuarios_moodle():
     return conexion
 
 
-def inicializar_usuarios_moodle():
+def _conectar_usuarios_moodle():
+    """Conecta a PostgreSQL de Supabase.
+
+    Si DATABASE_URL no está disponible, usa SQLite local para no romper
+    una instalación antigua. En Render, DATABASE_URL debe estar definida.
+    """
+    if DATABASE_URL:
+        if psycopg2 is None:
+            raise RuntimeError(
+                "Falta psycopg2-binary para conectar con PostgreSQL."
+            )
+
+        return psycopg2.connect(
+            DATABASE_URL,
+            sslmode="require",
+            connect_timeout=10,
+        )
+
+    return _conectar_sqlite_usuarios_moodle()
+
+
+def _inicializar_postgres_usuarios_moodle():
+    """Crea la tabla de cuentas Moodle en Supabase si no existe."""
     conexion = _conectar_usuarios_moodle()
-    conexion.close()
+    try:
+        with conexion.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS usuarios_moodle (
+                    telegram_user_id BIGINT PRIMARY KEY,
+                    moodle_token TEXT NOT NULL,
+                    moodle_url TEXT NOT NULL,
+                    creado_en TIMESTAMPTZ NOT NULL,
+                    actualizado_en TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        conexion.commit()
+    finally:
+        conexion.close()
+
+
+def _migrar_sqlite_a_postgres():
+    """Migra una base SQLite antigua a Supabase una sola vez."""
+    if not DATABASE_URL or not os.path.exists(ARCHIVO_USUARIOS_MOODLE):
+        return
+
+    try:
+        sqlite_conn = _conectar_sqlite_usuarios_moodle()
+        filas = sqlite_conn.execute(
+            """
+            SELECT telegram_user_id, moodle_token, moodle_url,
+                   creado_en, actualizado_en
+            FROM usuarios_moodle
+            """
+        ).fetchall()
+        sqlite_conn.close()
+
+        if not filas:
+            return
+
+        postgres_conn = _conectar_usuarios_moodle()
+        try:
+            with postgres_conn.cursor() as cursor:
+                for fila in filas:
+                    cursor.execute(
+                        """
+                        INSERT INTO usuarios_moodle
+                            (telegram_user_id, moodle_token, moodle_url, creado_en, actualizado_en)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (telegram_user_id) DO UPDATE SET
+                            moodle_token = EXCLUDED.moodle_token,
+                            moodle_url = EXCLUDED.moodle_url,
+                            actualizado_en = EXCLUDED.actualizado_en
+                        """,
+                        fila
+                    )
+            postgres_conn.commit()
+            print(
+                f"☁️ Migración Moodle → Supabase completada: {len(filas)} cuenta(s)."
+            )
+        finally:
+            postgres_conn.close()
+    except Exception as error:
+        print("⚠️ No se pudo migrar SQLite → Supabase:", repr(error))
+
+
+def inicializar_usuarios_moodle():
+    if DATABASE_URL:
+        _inicializar_postgres_usuarios_moodle()
+        _migrar_sqlite_a_postgres()
+    else:
+        conexion = _conectar_sqlite_usuarios_moodle()
+        conexion.close()
 
 
 def establecer_usuario_telegram(telegram_user_id):
@@ -100,22 +205,37 @@ def guardar_token_moodle_usuario(
         return False
 
     url = (moodle_url or MOODLE_URL).rstrip("/")
-    ahora = datetime.now(ZoneInfo("America/Mexico_City")).isoformat()
+    ahora = datetime.now(ZoneInfo("America/Mexico_City"))
 
     try:
         conexion = _conectar_usuarios_moodle()
-        conexion.execute(
-            """
-            INSERT INTO usuarios_moodle
-                (telegram_user_id, moodle_token, moodle_url, creado_en, actualizado_en)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(telegram_user_id) DO UPDATE SET
-                moodle_token=excluded.moodle_token,
-                moodle_url=excluded.moodle_url,
-                actualizado_en=excluded.actualizado_en
-            """,
-            (int(telegram_user_id), moodle_token.strip(), url, ahora, ahora)
-        )
+        if DATABASE_URL:
+            with conexion.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO usuarios_moodle
+                        (telegram_user_id, moodle_token, moodle_url, creado_en, actualizado_en)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (telegram_user_id) DO UPDATE SET
+                        moodle_token = EXCLUDED.moodle_token,
+                        moodle_url = EXCLUDED.moodle_url,
+                        actualizado_en = EXCLUDED.actualizado_en
+                    """,
+                    (int(telegram_user_id), moodle_token.strip(), url, ahora, ahora)
+                )
+        else:
+            conexion.execute(
+                """
+                INSERT INTO usuarios_moodle
+                    (telegram_user_id, moodle_token, moodle_url, creado_en, actualizado_en)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    moodle_token=excluded.moodle_token,
+                    moodle_url=excluded.moodle_url,
+                    actualizado_en=excluded.actualizado_en
+                """,
+                (int(telegram_user_id), moodle_token.strip(), url, ahora.isoformat(), ahora.isoformat())
+            )
         conexion.commit()
         conexion.close()
         return True
@@ -132,18 +252,36 @@ def obtener_configuracion_moodle_usuario(telegram_user_id=None):
 
     try:
         conexion = _conectar_usuarios_moodle()
-        fila = conexion.execute(
-            """
-            SELECT moodle_token, moodle_url
-            FROM usuarios_moodle
-            WHERE telegram_user_id = ?
-            """,
-            (int(user_id),)
-        ).fetchone()
+        if DATABASE_URL:
+            with conexion.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    """
+                    SELECT moodle_token, moodle_url
+                    FROM usuarios_moodle
+                    WHERE telegram_user_id = %s
+                    """,
+                    (int(user_id),)
+                )
+                fila = cursor.fetchone()
+        else:
+            fila = conexion.execute(
+                """
+                SELECT moodle_token, moodle_url
+                FROM usuarios_moodle
+                WHERE telegram_user_id = ?
+                """,
+                (int(user_id),)
+            ).fetchone()
         conexion.close()
 
         if not fila:
             return None
+
+        if DATABASE_URL:
+            return {
+                "token": fila["moodle_token"],
+                "url": fila["moodle_url"]
+            }
 
         return {
             "token": fila[0],
@@ -162,10 +300,17 @@ def eliminar_cuenta_moodle_usuario(telegram_user_id=None):
 
     try:
         conexion = _conectar_usuarios_moodle()
-        conexion.execute(
-            "DELETE FROM usuarios_moodle WHERE telegram_user_id = ?",
-            (int(user_id),)
-        )
+        if DATABASE_URL:
+            with conexion.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM usuarios_moodle WHERE telegram_user_id = %s",
+                    (int(user_id),)
+                )
+        else:
+            conexion.execute(
+                "DELETE FROM usuarios_moodle WHERE telegram_user_id = ?",
+                (int(user_id),)
+            )
         conexion.commit()
         conexion.close()
         return True
