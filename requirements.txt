@@ -5,3 +5,5 @@ Flask
 psycopg2-binary
 pypdf
 python-pptx
+python-docx
+openpyxl
