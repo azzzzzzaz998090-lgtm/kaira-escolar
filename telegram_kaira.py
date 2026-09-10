@@ -375,71 +375,6 @@ def quitar_entrega_pendiente(
 
 
 # =========================================================
-# 🔎 REVISIÓN PREVIA DE TRABAJOS
-# =========================================================
-
-ARCHIVO_REVISION_PENDIENTE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "revisiones_pendientes.json",
-)
-
-
-def cargar_revisiones_pendientes():
-    return _cargar_json(ARCHIVO_REVISION_PENDIENTE, {})
-
-
-def guardar_revisiones_pendientes(datos):
-    return _guardar_json(ARCHIVO_REVISION_PENDIENTE, datos)
-
-
-def guardar_revision_pendiente(user_id, assignid, nombre_tarea, nombre_archivo, ruta_archivo, resultado=None, contexto=None):
-    datos = cargar_revisiones_pendientes()
-    datos[str(int(user_id))] = {
-        "telegram_user_id": int(user_id),
-        "assignid": int(assignid),
-        "nombre_tarea": nombre_tarea or "Actividad",
-        "nombre_archivo": nombre_archivo or "archivo",
-        "ruta_archivo": ruta_archivo,
-        "resultado": resultado or {},
-        "contexto": contexto or {},
-        "creado_en": datetime.now().isoformat(),
-    }
-    guardar_revisiones_pendientes(datos)
-
-
-def obtener_revision_pendiente(user_id):
-    datos = cargar_revisiones_pendientes()
-    item = datos.get(str(int(user_id)))
-    if not item:
-        return None
-    try:
-        creado = datetime.fromisoformat(item.get("creado_en", ""))
-        if (datetime.now() - creado).total_seconds() > 1800:
-            ruta = item.get("ruta_archivo")
-            if ruta and os.path.exists(ruta):
-                os.remove(ruta)
-            datos.pop(str(int(user_id)), None)
-            guardar_revisiones_pendientes(datos)
-            return None
-    except Exception:
-        pass
-    return item
-
-
-def quitar_revision_pendiente(user_id, borrar_archivo=True):
-    datos = cargar_revisiones_pendientes()
-    item = datos.pop(str(int(user_id)), None)
-    guardar_revisiones_pendientes(datos)
-    if borrar_archivo and item:
-        ruta = item.get("ruta_archivo")
-        if ruta and os.path.exists(ruta):
-            try:
-                os.remove(ruta)
-            except Exception:
-                pass
-
-
-# =========================================================
 # 📁 CARPETA DE ARCHIVOS PARA TELEGRAM
 # =========================================================
 
@@ -1147,36 +1082,48 @@ async def comprobar_acceso(update):
 
         registrar_datos_usuario(update)
 
+        # Asegurar que exista registro.
+        crear_o_actualizar_usuario(
+            user_id,
+            update.effective_user.first_name or "",
+            update.effective_user.last_name or "",
+            update.effective_user.username or "",
+        )
+
         actualizar_estados()
         membresia = obtener_usuario(user_id)
 
-        # Si no existe ficha, solo se crea una prueba si todavía no fue usada.
-        registro_aut = cargar_usuarios_autorizados().get(user_id, {})
-        prueba_usada = bool(registro_aut.get("prueba_usada", False))
+        if (
+            membresia
+            and membresia.get("estado") == "vencida"
+        ):
+            if update.message:
+                teclado_renovacion = InlineKeyboardMarkup(
+                    [[
+                        InlineKeyboardButton(
+                            "💳 SOLICITAR RENOVACIÓN",
+                            callback_data="abrir_renovacion"
+                        )
+                    ]]
+                )
 
-        if membresia is None:
-            if prueba_usada:
-                await mostrar_pantalla_membresia_bloqueada(update)
-                return False
-            crear_o_actualizar_usuario(
-                user_id,
-                update.effective_user.first_name or "",
-                update.effective_user.last_name or "",
-                update.effective_user.username or "",
-            )
-            usuarios_aut = cargar_usuarios_autorizados()
-            usuarios_aut.setdefault(user_id, {})["prueba_usada"] = True
-            guardar_usuarios_autorizados(usuarios_aut)
-            membresia = obtener_usuario(user_id)
-
-        if not membresia or membresia.get("estado") != "activa":
-            await mostrar_pantalla_membresia_bloqueada(update)
+                await update.message.reply_text(
+                    "🔴 <b>Tu membresía ha vencido.</b>\n\n"
+                    "Contacta al administrador de KAIRA para renovarla.",
+                    parse_mode="HTML",
+                    reply_markup=teclado_renovacion,
+                )
             return False
 
+        # Si aún está activa, mantener acceso normal.
+
     except Exception as error:
-        print("⚠️ No pude comprobar la membresía:", error)
-        # Fail-closed: si no podemos comprobar la membresía, no damos acceso.
-        return False
+        print(
+            "⚠️ No pude comprobar la membresía:",
+            error
+        )
+        # No tumbar el bot por un fallo del panel.
+        # La autorización de Telegram sigue funcionando.
 
     return True
 
@@ -3738,8 +3685,6 @@ async def comando_precios(
         lineas = [
             "💰 <b>PRECIOS DE MEMBRESÍAS</b>",
             "",
-            "🎁 Prueba gratuita: <b>5 días · GRATIS</b>",
-            "",
             f"📅 Semanal: <b>${precios.get('Semanal', 0):.2f}</b>",
             f"📆 Mensual: <b>${precios.get('Mensual', 0):.2f}</b>",
             f"📊 Trimestral: <b>${precios.get('Trimestral', 0):.2f}</b>",
@@ -3989,6 +3934,12 @@ async def procesar_seleccion_plan_autorizacion(
     )
 
     equivalencias = {
+        "prueba": "Prueba",
+        "gratis": "Prueba",
+        "gratuita": "Prueba",
+        "prueba gratis": "Prueba",
+        "5 dias": "Prueba",
+        "5 días": "Prueba",
         "semanal": "Semanal",
         "semana": "Semanal",
         "mensual": "Mensual",
@@ -4010,6 +3961,7 @@ async def procesar_seleccion_plan_autorizacion(
         await update.message.reply_text(
             "⚠️ No reconocí ese plan.\n\n"
             "Responde con:\n"
+            "• 🎁 Prueba\n"
             "• Semanal\n"
             "• Mensual\n"
             "• Trimestral\n"
@@ -4109,61 +4061,100 @@ async def procesar_seleccion_plan_autorizacion(
         registro
     )
 
-    # Crear la membresía desde el momento de autorización.
+    # Crear la membresía SOLO ahora, cuando el administrador
+    # terminó de elegir Prueba o un plan de pago.
     try:
-        from membresias import (
-            registrar_membresia,
-        )
+        membresias_mod = __import__("membresias")
 
-        precio = __import__(
-            "membresias"
-        ).obtener_precio_plan(
-            plan
-        )
+        if plan == "Prueba":
+            # La prueba empieza exactamente cuando el administrador
+            # selecciona "Prueba". Nunca se inicia al autorizar.
+            membresia_existente = membresias_mod.obtener_usuario(
+                usuario_id
+            )
 
-        inicio = __import__(
-            "membresias"
-        ).fecha_iso_local(
-            __import__(
-                "membresias"
-            ).fecha_hora_actual_local()
-        )
+            if (
+                membresia_existente
+                and int(membresia_existente.get("prueba_usada", 0) or 0) == 1
+            ):
+                await update.message.reply_text(
+                    "⚠️ <b>PRUEBA NO DISPONIBLE</b>\n\n"
+                    "Este usuario ya utilizó su prueba gratuita de 5 días.",
+                    parse_mode="HTML",
+                )
+                return True
 
-        vencimiento = __import__(
-            "membresias"
-        ).calcular_fecha_vencimiento(
-            inicio,
-            plan,
-        )
+            inicio_dt = datetime.now(ZoneInfo("America/Mexico_City"))
+            vencimiento_dt = inicio_dt + timedelta(days=5)
+            inicio = inicio_dt.isoformat(timespec="minutes")
+            vencimiento = vencimiento_dt.isoformat(timespec="minutes")
+            precio = 0.0
 
-        registrar_membresia(
-            usuario_id,
-            registro.get("first_name", ""),
-            registro.get("last_name", ""),
-            inicio,
-            vencimiento,
-            precio,
-            1,
-            "",
-            "",
-            "activa",
-            plan,
-        )
+            membresias_mod.registrar_membresia(
+                usuario_id,
+                registro.get("first_name", ""),
+                registro.get("last_name", ""),
+                inicio,
+                vencimiento,
+                0.0,
+                1,
+                "",
+                "Prueba gratuita de 5 días",
+                "activa",
+                "Prueba",
+            )
+
+            pago_texto = "Gratis"
+
+        else:
+            precio = membresias_mod.obtener_precio_plan(
+                plan
+            )
+
+            inicio = membresias_mod.fecha_iso_local(
+                membresias_mod.fecha_hora_actual_local()
+            )
+
+            vencimiento = membresias_mod.calcular_fecha_vencimiento(
+                inicio,
+                plan,
+            )
+
+            membresias_mod.registrar_membresia(
+                usuario_id,
+                registro.get("first_name", ""),
+                registro.get("last_name", ""),
+                inicio,
+                vencimiento,
+                precio,
+                1,
+                "",
+                "",
+                "activa",
+                plan,
+            )
+
+            pago_texto = "Pagado"
+
+        # El acceso se concede AQUÍ, no antes.
+        registro["telegram_user_id"] = usuario_id
+        registro["autorizado_en"] = datetime.now().isoformat()
+        usuarios[usuario_id] = registro
+        guardar_usuarios_autorizados(usuarios)
+
+        bloqueados = cargar_ids_bloqueados()
+        bloqueados.discard(usuario_id)
+        guardar_ids_bloqueados(bloqueados)
 
     except Exception as error:
-
         print(
             "⚠️ No pude crear la membresía automáticamente:",
             error
         )
 
-        quitar_autorizacion_pendiente(
-            admin_id
-        )
-
         await update.message.reply_text(
-            "❌ El usuario fue autorizado, "
-            "pero ocurrió un problema creando la membresía."
+            "❌ No se completó el acceso del usuario.\n\n"
+            "El usuario seguirá sin acceso hasta terminar correctamente el proceso."
         )
 
         return True
@@ -4178,35 +4169,72 @@ async def procesar_seleccion_plan_autorizacion(
 
         precios = listar_precios_planes()
 
+        if plan == "Prueba":
+            plan_texto = "🎁 Prueba gratuita (5 días)"
+            precio_texto = "$0.00"
+            pago_texto = "Gratis"
+        else:
+            plan_texto = plan
+            precio_texto = f"${precios.get(plan, 0):.2f}"
+            pago_texto = "Pagado"
+
         await update.message.reply_text(
             "✅ <b>USUARIO REGISTRADO</b>\n\n"
             f"👤 {nombre}\n"
             f"🆔 {usuario_id}\n\n"
-            f"📦 Plan: <b>{plan}</b>\n"
-            f"💰 Precio: <b>${precios.get(plan, 0):.2f}</b>\n"
+            f"📦 Plan: <b>{plan_texto}</b>\n"
+            f"💰 Precio: <b>{precio_texto}</b>\n"
             f"📅 Inicio: <b>{inicio}</b>\n"
             f"⏳ Corte: <b>{vencimiento}</b>\n"
-            f"💳 Pago: <b>Pagado</b>\n\n"
-            "📩 Se enviaron las instrucciones al usuario.",
+            f"💳 Estado: <b>{pago_texto}</b>\n\n"
+            "📩 KAIRA le envió automáticamente su acceso al usuario.",
             parse_mode="HTML",
         )
 
     except Exception:
         await update.message.reply_text(
-            "✅ Usuario registrado y membresía configurada."
+            "✅ Usuario registrado y acceso activado."
         )
 
-    enviado = await enviar_instrucciones_autorizacion(
-        context.bot,
-        usuario_id,
-        nombre
-    )
+    # Mensaje automático de bienvenida: es el mismo menú principal
+    # que recibe el usuario cuando inicia KAIRA.
+    enviado = False
+    try:
+        teclado = teclado_menu_usuario(usuario_id)
+        nombre_usuario = (
+            registro.get("first_name", "") or ""
+        ).strip()
+
+        texto_bienvenida = (
+            f"🤖 <b>KAIRA</b>\n\n"
+            f"Hola {nombre_usuario or '👋'}.\n"
+            "Tu acceso ya está activo.\n\n"
+            "Selecciona una opción:"
+        )
+
+        await context.bot.send_message(
+            chat_id=usuario_id,
+            text=texto_bienvenida,
+            parse_mode="HTML",
+            reply_markup=teclado,
+        )
+        enviado = True
+
+    except Exception as error:
+        print(
+            f"⚠️ No pude enviar el menú automático al usuario {usuario_id}:",
+            error,
+        )
 
     if not enviado:
         await update.message.reply_text(
-            "⚠️ No pude enviarle el mensaje automáticamente. "
-            "Pídele que abra el chat con KAIRA y escriba /start."
+            "⚠️ El acceso quedó activado, pero no pude enviar el menú automático. "
+            "El usuario puede abrir KAIRA y escribir /start."
         )
+
+    quitar_autorizacion_pendiente(
+        admin_id
+    )
 
     return True
 
@@ -4523,53 +4551,10 @@ async def admin_decision_acceso_callback(
             nombre,
         )
 
-        # Guardar/actualizar el perfil básico.
-        usuarios = cargar_usuarios_autorizados()
-        bloqueados = cargar_ids_bloqueados()
-
-        bloqueados.discard(
-            user_id
-        )
-
-        registro = usuarios.get(
-            user_id,
-            {
-                "telegram_user_id": user_id,
-                "first_name": solicitud.get(
-                    "first_name",
-                    ""
-                ),
-                "last_name": solicitud.get(
-                    "last_name",
-                    ""
-                ),
-                "username": solicitud.get(
-                    "username",
-                    ""
-                ),
-                "telegram_first_name": solicitud.get(
-                    "first_name",
-                    ""
-                ),
-                "telegram_last_name": solicitud.get(
-                    "last_name",
-                    ""
-                ),
-                "autorizado_en": "",
-                "ultimo_acceso": "",
-                "prueba_usada": False,
-            }
-        )
-
-        usuarios[user_id] = registro
-
-        guardar_usuarios_autorizados(
-            usuarios
-        )
-
-        guardar_ids_bloqueados(
-            bloqueados
-        )
+        # IMPORTANTE: autorizar aquí NO da acceso todavía.
+        # El usuario permanece fuera de usuarios_autorizados hasta que
+        # el administrador elija Prueba o un plan de pago.
+        # Así no puede entrar a KAIRA mientras el proceso esté incompleto.
 
         precios = {}
 
@@ -4585,7 +4570,8 @@ async def admin_decision_acceso_callback(
             "✅ <b>AUTORIZACIÓN ACEPTADA</b>\n\n"
             f"👤 {nombre}\n"
             f"🆔 <code>{user_id}</code>\n\n"
-            "Ahora selecciona el plan respondiendo a este chat:\n\n"
+            "Ahora termina el proceso seleccionando una opción:\n\n"
+            "🎁 Prueba gratuita — <b>5 días · GRATIS</b>\n"
             f"📅 Semanal — <b>${precios.get('Semanal', 0):.2f}</b>\n"
             f"📆 Mensual — <b>${precios.get('Mensual', 0):.2f}</b>\n"
             f"📊 Trimestral — <b>${precios.get('Trimestral', 0):.2f}</b>\n"
@@ -4647,289 +4633,6 @@ async def comando_solicitar_acceso(
 # =========================================================
 # 💳 SOLICITUDES DE RENOVACIÓN
 # =========================================================
-
-ARCHIVO_SOLICITUDES_CONTRATACION = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "solicitudes_contratacion_pendientes.json",
-)
-
-
-def cargar_solicitudes_contratacion():
-    datos = _cargar_json(ARCHIVO_SOLICITUDES_CONTRATACION, {})
-    return datos if isinstance(datos, dict) else {}
-
-
-def guardar_solicitudes_contratacion(datos):
-    return _guardar_json(ARCHIVO_SOLICITUDES_CONTRATACION, datos)
-
-
-def registrar_solicitud_contratacion(user):
-    datos = cargar_solicitudes_contratacion()
-    datos[str(int(user.id))] = {
-        "telegram_user_id": int(user.id),
-        "first_name": (user.first_name or "").strip(),
-        "last_name": (user.last_name or "").strip(),
-        "username": (user.username or "").strip(),
-        "creado_en": datetime.now().isoformat(),
-    }
-    return guardar_solicitudes_contratacion(datos)
-
-
-def obtener_solicitud_contratacion(user_id):
-    return cargar_solicitudes_contratacion().get(str(int(user_id)))
-
-
-def quitar_solicitud_contratacion(user_id):
-    datos = cargar_solicitudes_contratacion()
-    datos.pop(str(int(user_id)), None)
-    return guardar_solicitudes_contratacion(datos)
-
-
-async def mostrar_pantalla_membresia_bloqueada(update):
-    """Pantalla única para usuarios sin acceso por vencimiento."""
-    teclado = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 CONTRATAR MEMBRESÍA", callback_data="contratar_membresia")],
-        [InlineKeyboardButton("📋 VER PLANES Y PRECIOS", callback_data="ver_planes_publicos")],
-    ])
-    mensaje = (
-        "🔒 <b>TU ACCESO A KAIRA HA TERMINADO</b>\n\n"
-        "Para continuar utilizando KAIRA, selecciona una opción:"
-    )
-    try:
-        if update.callback_query and update.callback_query.message:
-            await update.callback_query.edit_message_text(
-                mensaje, parse_mode="HTML", reply_markup=teclado
-            )
-        elif update.message:
-            await update.message.reply_text(
-                mensaje, parse_mode="HTML", reply_markup=teclado
-            )
-    except Exception as error:
-        print("⚠️ No pude mostrar pantalla de membresía:", error)
-
-
-async def ver_planes_publicos_callback(update, context):
-    query = update.callback_query
-    if not query or not query.from_user:
-        return
-    await query.answer()
-    try:
-        from membresias import listar_precios_planes
-        precios = listar_precios_planes()
-    except Exception:
-        precios = {}
-    texto = (
-        "📋 <b>PLANES Y PRECIOS</b>\n\n"
-        "🎁 Prueba gratuita — <b>5 días · GRATIS</b>\n\n"
-        "📅 Semanal — <b>${:.2f}</b>\n"
-        "📆 Mensual — <b>${:.2f}</b>\n"
-        "📊 Trimestral — <b>${:.2f}</b>\n"
-        "🗓️ Semestral — <b>${:.2f}</b>\n"
-        "📚 Anual — <b>${:.2f}</b>\n\n"
-        "Selecciona <b>CONTRATAR MEMBRESÍA</b> si deseas continuar."
-    ).format(
-        float(precios.get("Semanal", 0)),
-        float(precios.get("Mensual", 0)),
-        float(precios.get("Trimestral", 0)),
-        float(precios.get("Semestral", 0)),
-        float(precios.get("Anual", 0)),
-    )
-    teclado = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 CONTRATAR MEMBRESÍA", callback_data="contratar_membresia")],
-    ])
-    await query.edit_message_text(texto, parse_mode="HTML", reply_markup=teclado)
-
-
-async def contratar_membresia_callback(update, context):
-    query = update.callback_query
-    if not query or not query.from_user:
-        return
-    await query.answer()
-    user = query.from_user
-    uid = int(user.id)
-    if usuario_admin(uid):
-        await query.edit_message_text("👑 El administrador no necesita contratar una membresía.")
-        return
-
-    pendiente = obtener_solicitud_contratacion(uid)
-    if pendiente:
-        await query.edit_message_text(
-            "⏳ <b>SOLICITUD EN REVISIÓN</b>\n\n"
-            "Tu solicitud ya fue enviada al administrador.\n"
-            "Espera a que la revise.", parse_mode="HTML"
-        )
-        return
-
-    registrar_solicitud_contratacion(user)
-    admin_id = _id_admin()
-    if not admin_id:
-        quitar_solicitud_contratacion(uid)
-        await query.edit_message_text("⚠️ No se encontró al administrador de KAIRA.")
-        return
-
-    nombre = " ".join(x for x in ((user.first_name or "").strip(), (user.last_name or "").strip()) if x).strip() or "@usuario"
-    teclado_admin = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ AUTORIZAR", callback_data=f"contratacion_autorizar:{uid}"),
-        InlineKeyboardButton("❌ DENEGAR", callback_data=f"contratacion_denegar:{uid}"),
-    ]])
-    texto_admin = (
-        "🔔 <b>SOLICITUD DE MEMBRESÍA</b>\n\n"
-        f"👤 <b>{html.escape(nombre)}</b>\n"
-        f"🆔 Telegram ID: <code>{uid}</code>\n"
-        f"👤 Username: <code>@{html.escape(user.username)}</code>" if user.username else
-        "🔔 <b>SOLICITUD DE MEMBRESÍA</b>\n\n"
-        f"👤 <b>{html.escape(nombre)}</b>\n"
-        f"🆔 Telegram ID: <code>{uid}</code>\n"
-        "👤 Username: <code>sin username</code>"
-    )
-    try:
-        await context.bot.send_message(chat_id=admin_id, text=texto_admin, parse_mode="HTML", reply_markup=teclado_admin)
-        await query.edit_message_text(
-            "✅ <b>Solicitud enviada.</b>\n\n"
-            "El administrador recibió tu solicitud.\n"
-            "Espera a que la revise.", parse_mode="HTML"
-        )
-    except Exception as error:
-        print("⚠️ No pude enviar solicitud de membresía:", error)
-        quitar_solicitud_contratacion(uid)
-        await query.edit_message_text("❌ No pude enviar la solicitud. Inténtalo nuevamente.")
-
-
-async def admin_decision_contratacion_callback(update, context):
-    query = update.callback_query
-    if not query or not query.from_user:
-        return
-    if not usuario_admin(query.from_user.id):
-        await query.answer("No tienes permiso.", show_alert=True)
-        return
-    await query.answer()
-    try:
-        accion, uid_text = (query.data or "").split(":", 1)
-        uid = int(uid_text)
-    except Exception:
-        await query.edit_message_text("❌ Solicitud inválida.")
-        return
-
-    solicitud = obtener_solicitud_contratacion(uid)
-    if not solicitud:
-        await query.edit_message_text("ℹ️ Esta solicitud ya fue atendida.")
-        return
-
-    nombre = " ".join(x for x in (solicitud.get("first_name", ""), solicitud.get("last_name", "")) if x).strip() or "@usuario"
-
-    if accion == "contratacion_denegar":
-        quitar_solicitud_contratacion(uid)
-        try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text="❌ <b>Solicitud no aprobada.</b>\n\nTu solicitud de membresía no fue autorizada.",
-                parse_mode="HTML",
-            )
-        except Exception as error:
-            print("⚠️ Aviso de denegación:", error)
-        await query.edit_message_text(
-            "❌ <b>SOLICITUD DENEGADA</b>\n\n"
-            f"👤 {html.escape(nombre)}\n🆔 <code>{uid}</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    try:
-        from membresias import listar_precios_planes
-        precios = listar_precios_planes()
-    except Exception:
-        precios = {}
-    teclado = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📅 Semanal ${precios.get('Semanal',0):.2f}", callback_data=f"contratacion_plan:Semanal:{uid}")],
-        [InlineKeyboardButton(f"📆 Mensual ${precios.get('Mensual',0):.2f}", callback_data=f"contratacion_plan:Mensual:{uid}")],
-        [InlineKeyboardButton(f"📊 Trimestral ${precios.get('Trimestral',0):.2f}", callback_data=f"contratacion_plan:Trimestral:{uid}")],
-        [InlineKeyboardButton(f"🗓️ Semestral ${precios.get('Semestral',0):.2f}", callback_data=f"contratacion_plan:Semestral:{uid}")],
-        [InlineKeyboardButton(f"📚 Anual ${precios.get('Anual',0):.2f}", callback_data=f"contratacion_plan:Anual:{uid}")],
-    ])
-    await query.edit_message_text(
-        "✅ <b>SOLICITUD AUTORIZADA</b>\n\n"
-        f"👤 {html.escape(nombre)}\n"
-        f"🆔 <code>{uid}</code>\n\n"
-        "Selecciona la membresía que vas a activar:",
-        parse_mode="HTML", reply_markup=teclado
-    )
-
-
-async def procesar_plan_contratacion_callback(update, context):
-    query = update.callback_query
-    if not query or not query.from_user:
-        return
-    if not usuario_admin(query.from_user.id):
-        await query.answer("No tienes permiso.", show_alert=True)
-        return
-    await query.answer()
-    try:
-        _, plan, uid_text = (query.data or "").split(":", 2)
-        uid = int(uid_text)
-    except Exception:
-        await query.edit_message_text("❌ Selección inválida.")
-        return
-    if plan not in ("Semanal", "Mensual", "Trimestral", "Semestral", "Anual"):
-        await query.edit_message_text("❌ Plan no válido.")
-        return
-    solicitud = obtener_solicitud_contratacion(uid)
-    if not solicitud:
-        await query.edit_message_text("ℹ️ La solicitud ya fue atendida.")
-        return
-    try:
-        from membresias import registrar_membresia, listar_precios_planes
-        precios = listar_precios_planes()
-        precio = float(precios.get(plan, 0))
-        inicio = datetime.now(ZoneInfo("America/Mexico_City")).isoformat(timespec="seconds")
-        # Registrar/activar la membresía desde el momento de la autorización.
-        registrar_membresia(
-            uid, solicitud.get("first_name", ""), solicitud.get("last_name", ""),
-            fecha_inicio=inicio, fecha_vencimiento="", precio=precio, pagado=1,
-            metodo_pago="Autorizado por administrador", estado="activa", tipo_membresia=plan
-        )
-        usuarios = cargar_usuarios_autorizados()
-        registro = usuarios.get(uid, {"telegram_user_id": uid})
-        registro.update({
-            "first_name": solicitud.get("first_name", ""),
-            "last_name": solicitud.get("last_name", ""),
-            "username": solicitud.get("username", ""),
-            "prueba_usada": True,
-            "autorizado_en": datetime.now().isoformat(),
-        })
-        usuarios[uid] = registro
-        guardar_usuarios_autorizados(usuarios)
-        bloqueados = cargar_ids_bloqueados()
-        bloqueados.discard(uid)
-        guardar_ids_bloqueados(bloqueados)
-        mem = __import__("membresias").obtener_usuario(uid)
-        fecha_vencimiento = mem.get("fecha_vencimiento", "") if mem else ""
-        quitar_solicitud_contratacion(uid)
-        await query.edit_message_text(
-            "✅ <b>MEMBRESÍA ACTIVADA</b>\n\n"
-            f"👤 {html.escape(solicitud.get('first_name','Usuario'))}\n"
-            f"🆔 <code>{uid}</code>\n"
-            f"📦 Plan: <b>{plan}</b>\n"
-            f"💰 Precio: <b>${precio:.2f}</b>\n"
-            f"⏳ Vence: <b>{fecha_vencimiento}</b>",
-            parse_mode="HTML"
-        )
-        try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text=(
-                    "✅ <b>MEMBRESÍA ACTIVADA</b>\n\n"
-                    f"📦 Plan: <b>{plan}</b>\n"
-                    f"💰 Precio: <b>${precio:.2f}</b>\n"
-                    f"⏳ Válida hasta: <b>{fecha_vencimiento}</b>\n\n"
-                    "🟢 Ya puedes utilizar KAIRA nuevamente."
-                ), parse_mode="HTML"
-            )
-        except Exception as error:
-            print("⚠️ No pude avisar activación:", error)
-    except Exception as error:
-        print("⚠️ Error activando contratación:", error)
-        await query.edit_message_text("❌ No pude activar la membresía. Revisa los registros de KAIRA.")
-
 
 ARCHIVO_RENOVACIONES_PENDIENTES = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -5613,22 +5316,6 @@ async def alertar_vencimientos_admin(
             dias_para_vencer,
         )
 
-        try:
-            from membresias import limpiar_usuarios_inactivos
-            eliminados = limpiar_usuarios_inactivos(30)
-            if eliminados:
-                autorizados = cargar_usuarios_autorizados()
-                for uid_eliminado in eliminados:
-                    autorizados.pop(int(uid_eliminado), None)
-                    try:
-                        from moodle_kaira import eliminar_cuenta_moodle_usuario
-                        eliminar_cuenta_moodle_usuario(int(uid_eliminado))
-                    except Exception as error_moodle:
-                        print("⚠️ Limpieza Moodle:", error_moodle)
-                guardar_usuarios_autorizados(autorizados)
-        except Exception as error_limpieza:
-            print("⚠️ Limpieza de usuarios inactivos:", error_limpieza)
-
         usuarios=listar_usuarios()
         alertas=cargar_alertas_membresia()
 
@@ -5661,8 +5348,10 @@ async def alertar_vencimientos_admin(
 
             avisos=registro.get("avisos",[])
 
-            if dias == 2:
-                codigo="2"
+            if dias == 7:
+                codigo="7"
+            elif dias == 3:
+                codigo="3"
             elif dias == 1:
                 codigo="1"
             elif dias == 0:
@@ -5676,23 +5365,35 @@ async def alertar_vencimientos_admin(
                     (usuario.get("apellido") or "")
                 ).strip() or "Usuario"
 
-                if codigo == "2":
+                if codigo == "7":
                     texto_usuario=(
-                        "⚠️ <b>Tu acceso a KAIRA termina en 2 días.</b>\n\n"
+                        "🔔 <b>Tu membresía vence en 7 días.</b>\n\n"
                         f"⏳ Vencimiento: <b>{fecha}</b>\n\n"
-                        "Si deseas continuar, puedes contratar una membresía."
+                        "Puedes solicitar una renovación con /renovar."
                     )
                     texto_admin=(
-                        "🟡 <b>MEMBRESÍA: 2 DÍAS</b>\n\n"
+                        "🟡 <b>MEMBRESÍA: 7 DÍAS</b>\n\n"
+                        f"👤 {nombre}\n"
+                        f"🆔 <code>{uid}</code>\n"
+                        f"⏳ {fecha}"
+                    )
+                elif codigo == "3":
+                    texto_usuario=(
+                        "⚠️ <b>Tu membresía vence en 3 días.</b>\n\n"
+                        f"⏳ Vencimiento: <b>{fecha}</b>\n\n"
+                        "Solicita tu renovación si deseas continuar."
+                    )
+                    texto_admin=(
+                        "🟠 <b>MEMBRESÍA: 3 DÍAS</b>\n\n"
                         f"👤 {nombre}\n"
                         f"🆔 <code>{uid}</code>\n"
                         f"⏳ {fecha}"
                     )
                 elif codigo == "1":
                     texto_usuario=(
-                        "🔴 <b>Tu acceso a KAIRA termina mañana.</b>\n\n"
+                        "🔴 <b>Tu membresía vence mañana.</b>\n\n"
                         f"⏳ Vencimiento: <b>{fecha}</b>\n\n"
-                        "Si deseas continuar, contrata una membresía."
+                        "Solicita tu renovación para no perder el acceso."
                     )
                     texto_admin=(
                         "🔴 <b>MEMBRESÍA: 1 DÍA</b>\n\n"
@@ -5702,8 +5403,9 @@ async def alertar_vencimientos_admin(
                     )
                 else:
                     texto_usuario=(
-                        "🔒 <b>Hoy termina tu acceso a KAIRA.</b>\n\n"
-                        "A partir de ahora solo podrás ver planes y solicitar una membresía."
+                        "🔴 <b>Tu membresía vence hoy.</b>\n\n"
+                        f"⏳ Vencimiento: <b>{fecha}</b>\n\n"
+                        "Solicita una renovación al administrador."
                     )
                     texto_admin=(
                         "🚨 <b>MEMBRESÍA VENCE HOY</b>\n\n"
@@ -5733,24 +5435,27 @@ async def alertar_vencimientos_admin(
 
                 avisos.append(codigo)
 
-            # Al vencer se bloquea por estado de membresía, no por la lista
-            # de revocados, para que el usuario siga viendo únicamente
-            # CONTRATAR / PLANES.
-            if dias < 0 and admin_id and "expirado" not in avisos:
-                try:
-                    await context.bot.send_message(
-                        chat_id=admin_id,
-                        text=(
-                            "🔒 <b>MEMBRESÍA VENCIDA</b>\n\n"
-                            f"👤 {html.escape(nombre)}\n"
-                            f"🆔 <code>{uid}</code>\n"
-                            "El acceso quedó bloqueado hasta que se contrate una nueva membresía."
-                        ),
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
-                avisos.append("expirado")
+            # Suspender al vencer. No auto-renueva.
+            if dias < 0:
+                if uid not in cargar_ids_bloqueados():
+                    bloqueados=cargar_ids_bloqueados()
+                    bloqueados.add(uid)
+                    guardar_ids_bloqueados(bloqueados)
+
+                    if admin_id:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=admin_id,
+                                text=(
+                                    "🚫 <b>ACCESO SUSPENDIDO</b>\n\n"
+                                    f"👤 {nombre}\n"
+                                    f"🆔 <code>{uid}</code>\n"
+                                    "La membresía venció y no fue renovada."
+                                ),
+                                parse_mode="HTML",
+                            )
+                        except Exception:
+                            pass
 
             alertas[clave]=registro
 
@@ -7773,13 +7478,6 @@ async def mostrar_detalle_tarea_boton(
         )
     )
 
-    boton_revision=[
-        [InlineKeyboardButton(
-            "📄 REVISAR MI TRABAJO",
-            callback_data=f"revisar_tarea:{int(assignid)}",
-        )]
-    ]
-
     motivo=capacidad.get(
         "motivo",
         "no_confirmado"
@@ -7806,7 +7504,6 @@ async def mostrar_detalle_tarea_boton(
 
         teclado=InlineKeyboardMarkup(
             botones_archivos
-            + boton_revision
             + extras
             + [
                 [
@@ -7853,7 +7550,6 @@ async def mostrar_detalle_tarea_boton(
 
         teclado=InlineKeyboardMarkup(
             botones_archivos
-            + boton_revision
             + extras
             + [
                 [
@@ -7896,7 +7592,6 @@ async def mostrar_detalle_tarea_boton(
 
         teclado=InlineKeyboardMarkup(
             botones_archivos
-            + boton_revision
             + extras
             + [
                 [
@@ -8204,276 +7899,6 @@ async def recibir_documento_entrega(
                     "⚠️ No pude borrar archivo temporal:",
                     error
                 )
-
-
-async def iniciar_revision_tarea(update, assignid):
-    if not await comprobar_acceso(update):
-        return
-
-    user_id = update.effective_user.id
-    preparar_usuario_moodle(user_id)
-    query = update.callback_query
-
-    try:
-        from moodle_kaira import obtener_contexto_revision_tarea
-        contexto = obtener_contexto_revision_tarea(int(assignid))
-    except Exception as error:
-        print("⚠️ Error preparando revisión:", error)
-        contexto = {"ok": False, "error": "No pude consultar la actividad en Moodle."}
-
-    if not contexto.get("ok"):
-        await query.edit_message_text(
-            "❌ <b>No pude preparar la revisión.</b>\n\n"
-            + html.escape(str(contexto.get("error", "Moodle no devolvió la actividad."))),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                "⬅️ Volver a tarea",
-                callback_data=f"tarea_detalle:{int(assignid)}",
-            )]]),
-        )
-        return
-
-    quitar_revision_pendiente(user_id)
-    nombre = contexto.get("tarea", {}).get("name", "Actividad")
-    await query.edit_message_text(
-        "📄 <b>REVISAR MI TRABAJO</b>\n\n"
-        f"📝 <b>{html.escape(str(nombre))}</b>\n\n"
-        "Ahora envía el archivo que quieres revisar.\n\n"
-        "📌 La revisión NO es una entrega en Moodle.\n"
-        "📌 No cambia fechas ni calificaciones.\n"
-        "📌 KAIRA comparará el archivo con los requisitos visibles de Moodle.\n\n"
-        "Formatos: PDF, DOCX, XLSX o PPTX.",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-            "❌ Cancelar",
-            callback_data=f"tarea_detalle:{int(assignid)}",
-        )]]),
-    )
-    # Guardamos el contexto académico en memoria temporal del proceso para que
-    # la recepción del archivo sea inequívoca.
-    datos = cargar_revisiones_pendientes()
-    datos[str(int(user_id))] = {
-        "telegram_user_id": int(user_id),
-        "assignid": int(assignid),
-        "nombre_tarea": nombre,
-        "contexto": contexto,
-        "creado_en": datetime.now().isoformat(),
-    }
-    guardar_revisiones_pendientes(datos)
-
-
-def _icono_estado(estado):
-    return {
-        "cumplido": "✅",
-        "faltante": "❌",
-        "no_verificable": "⚠️",
-    }.get(str(estado).lower(), "⚠️")
-
-
-def _formatear_revision(resultado):
-    lineas = ["🔎 <b>REVISIÓN PREVIA</b>", ""]
-    resumen = str(resultado.get("resumen", "")).strip()
-    if resumen:
-        lineas += [html.escape(resumen), ""]
-
-    requisitos = resultado.get("requisitos", []) or []
-    if requisitos:
-        lineas += ["<b>REQUISITOS DE MOODLE</b>"]
-        for item in requisitos[:30]:
-            if not isinstance(item, dict):
-                continue
-            estado = item.get("estado", "no_verificable")
-            req = html.escape(str(item.get("requisito", "Requisito")))
-            evidencia = str(item.get("evidencia", "")).strip()
-            linea = f"{_icono_estado(estado)} {req}"
-            if evidencia:
-                linea += f"\n   <i>{html.escape(evidencia[:350])}</i>"
-            lineas.append(linea)
-        lineas.append("")
-
-    formato = resultado.get("formato", []) or []
-    if formato:
-        lineas += ["<b>FORMATO</b>"]
-        for item in formato[:15]:
-            if not isinstance(item, dict):
-                continue
-            req = html.escape(str(item.get("requisito", "Formato")))
-            evidencia = str(item.get("evidencia", "")).strip()
-            linea = f"{_icono_estado(item.get('estado'))} {req}"
-            if evidencia:
-                linea += f"\n   <i>{html.escape(evidencia[:300])}</i>"
-            lineas.append(linea)
-        lineas.append("")
-
-    recomendaciones = resultado.get("recomendaciones", []) or []
-    if recomendaciones:
-        lineas += ["💡 <b>RECOMENDACIONES DE KAIRA</b>"]
-        for rec in recomendaciones[:8]:
-            lineas.append("• " + html.escape(str(rec)))
-        lineas.append("")
-
-    if resultado.get("rubrica_disponible"):
-        lineas.append("📋 La revisión tomó como referencia la rúbrica/criterios disponibles en Moodle.")
-    else:
-        lineas.append("ℹ️ No encontré una rúbrica o lista de cotejo accesible para esta cuenta; la revisión se basó en las instrucciones visibles de Moodle.")
-
-    lineas += ["", "⚠️ <i>Esta revisión es asistencia previa y no sustituye la calificación oficial del profesor.</i>"]
-    return "\n".join(lineas)
-
-
-async def recibir_documento_revision(update, context, pendiente):
-    user_id = update.effective_user.id
-    document = update.message.document
-    nombre_archivo = document.file_name or "archivo"
-    ext = os.path.splitext(nombre_archivo)[1].lower()
-    permitidas = {".pdf", ".docx", ".xlsx", ".pptx"}
-    if ext not in permitidas:
-        await update.message.reply_text("❌ Formato no compatible. Usa PDF, DOCX, XLSX o PPTX.")
-        return
-
-    temp_path = None
-    try:
-        await update.message.reply_text(
-            "🔎 <b>Analizando tu trabajo...</b>\n\n"
-            f"📎 {html.escape(nombre_archivo)}\n"
-            "⏳ Comparando contra los requisitos visibles de Moodle.",
-            parse_mode="HTML",
-        )
-
-        telegram_file = await document.get_file()
-        suffix = ext[:12]
-        with tempfile.NamedTemporaryFile(prefix="kaira_revision_", suffix=suffix, delete=False) as temporal:
-            temp_path = temporal.name
-        await telegram_file.download_to_drive(custom_path=temp_path)
-
-        from revisor_trabajos import revisar_archivo, guardar_revision_supabase
-        contexto = pendiente.get("contexto") or {}
-        revision = await asyncio.to_thread(
-            revisar_archivo,
-            temp_path,
-            nombre_archivo,
-            contexto,
-        )
-        resultado = revision["resultado"]
-        assignid = int(pendiente["assignid"])
-
-        guardar_revision_supabase(
-            user_id,
-            assignid,
-            nombre_archivo,
-            resultado,
-        )
-
-        guardar_revision_pendiente(
-            user_id,
-            assignid,
-            pendiente.get("nombre_tarea", "Actividad"),
-            nombre_archivo,
-            temp_path,
-            resultado,
-            contexto=contexto,
-        )
-        temp_path = None  # La conservamos temporalmente hasta decidir entregar/corregir.
-
-        await update.message.reply_text(
-            _formatear_revision(resultado),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 SUBIR CORRECCIÓN", callback_data=f"revisar_tarea:{assignid}")],
-                [InlineKeyboardButton("📤 ENTREGAR DE TODOS MODOS", callback_data="revisar_entregar")],
-                [InlineKeyboardButton("📋 VER ACTIVIDAD", callback_data=f"tarea_detalle:{assignid}")],
-            ]),
-        )
-    except Exception as error:
-        print("⚠️ Error revisando archivo:", error)
-        await update.message.reply_text(
-            "❌ <b>No pude revisar el archivo.</b>\n\n"
-            + html.escape(str(error)[:800]),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                "📋 Ver actividad",
-                callback_data=f"tarea_detalle:{int(pendiente['assignid'])}",
-            )]]),
-        )
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
-
-
-async def entregar_archivo_revisado_callback(update, context):
-    if not await comprobar_acceso(update):
-        return
-    user_id = update.effective_user.id
-    preparar_usuario_moodle(user_id)
-    query = update.callback_query
-    pendiente = obtener_revision_pendiente(user_id)
-    if not pendiente or not pendiente.get("ruta_archivo"):
-        await query.answer("La revisión temporal ya expiró. Vuelve a subir el archivo.", show_alert=True)
-        return
-
-    ruta = pendiente.get("ruta_archivo")
-    if not os.path.isfile(ruta):
-        await query.answer("El archivo temporal ya no está disponible. Vuelve a subirlo.", show_alert=True)
-        quitar_revision_pendiente(user_id, borrar_archivo=False)
-        return
-
-    assignid = int(pendiente["assignid"])
-    try:
-        from moodle_kaira import obtener_usuario_moodle_id_actual, obtener_capacidad_entrega, entregar_archivo_tarea
-        mid = obtener_usuario_moodle_id_actual()
-        capacidad = obtener_capacidad_entrega(assignid, mid) if mid else {"puede_entregar": False, "motivo": "cerrada"}
-        if not capacidad.get("puede_entregar", False):
-            await query.edit_message_text(
-                "🔒 <b>BUZÓN CERRADO</b>\n\nMoodle no permite nuevas entregas para esta actividad.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 Ver actividad", callback_data=f"tarea_detalle:{assignid}")]]),
-            )
-            return
-
-        await query.edit_message_text("⏳ <b>Enviando el archivo revisado a Moodle...</b>", parse_mode="HTML")
-        resultado = await asyncio.to_thread(
-            entregar_archivo_tarea,
-            assignid,
-            ruta,
-            pendiente.get("nombre_archivo", "archivo"),
-        )
-        if not resultado.get("ok"):
-            await query.edit_message_text(
-                "❌ <b>Moodle rechazó la entrega.</b>\n\n" + html.escape(str(resultado.get("error", "Error desconocido"))),
-                parse_mode="HTML",
-            )
-            return
-
-        nombre = html.escape(str(pendiente.get("nombre_archivo", "archivo")))
-        quitar_revision_pendiente(user_id, borrar_archivo=True)
-        estado = "🟢 Moodle confirmó el envío para calificación." if resultado.get("enviada") else "🟡 Moodle guardó el archivo, pero no confirmó el paso final de envío."
-        await query.edit_message_text(
-            "📤 <b>ENTREGA REALIZADA</b>\n\n"
-            f"📎 {nombre}\n\n{estado}\n\n"
-            "⚠️ La revisión previa no sustituye la calificación del profesor.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📚 Mis tareas", callback_data="menu_tareas")]]),
-        )
-    except Exception as error:
-        print("⚠️ Error entregando revisión:", error)
-        await query.edit_message_text(
-            "❌ <b>No pude realizar la entrega.</b>\n\n" + html.escape(str(error)[:800]),
-            parse_mode="HTML",
-        )
-
-
-async def recibir_documento_kaira(update, context):
-    if not update.message or not update.effective_user:
-        return
-    pendiente_revision = obtener_revision_pendiente(update.effective_user.id)
-    if pendiente_revision and pendiente_revision.get("contexto"):
-        if not await comprobar_acceso(update):
-            return
-        await recibir_documento_revision(update, context, pendiente_revision)
-        return
-    await recibir_documento_entrega(update, context)
 
 
 async def callbacks_menu(
@@ -10242,7 +9667,6 @@ async def callbacks_menu(
                 p=listar_precios_planes()
                 texto=(
                     "💰 <b>PRECIOS</b>\n\n"
-                    "🎁 Prueba gratuita: <b>5 días · GRATIS</b>\n\n"
                     f"📅 Semanal: <b>${p.get('Semanal',0):.2f}</b>\n"
                     f"📆 Mensual: <b>${p.get('Mensual',0):.2f}</b>\n"
                     f"📊 Trimestral: <b>${p.get('Trimestral',0):.2f}</b>\n"
@@ -11313,34 +10737,6 @@ def ejecutar_telegram():
 
         app.add_handler(
             CallbackQueryHandler(
-                contratar_membresia_callback,
-                pattern=r"^contratar_membresia$",
-            )
-        )
-
-        app.add_handler(
-            CallbackQueryHandler(
-                ver_planes_publicos_callback,
-                pattern=r"^ver_planes_publicos$",
-            )
-        )
-
-        app.add_handler(
-            CallbackQueryHandler(
-                admin_decision_contratacion_callback,
-                pattern=r"^contratacion_(autorizar|denegar):\d+$",
-            )
-        )
-
-        app.add_handler(
-            CallbackQueryHandler(
-                procesar_plan_contratacion_callback,
-                pattern=r"^contratacion_plan:(Semanal|Mensual|Trimestral|Semestral|Anual):\d+$",
-            )
-        )
-
-        app.add_handler(
-            CallbackQueryHandler(
                 abrir_renovacion_callback,
                 pattern=r"^abrir_renovacion$",
             )
@@ -11377,21 +10773,7 @@ def ejecutar_telegram():
         app.add_handler(
             MessageHandler(
                 filters.Document.ALL,
-                recibir_documento_kaira,
-            )
-        )
-
-        app.add_handler(
-            CallbackQueryHandler(
-                iniciar_revision_tarea,
-                pattern=r"^revisar_tarea:\d+$",
-            )
-        )
-
-        app.add_handler(
-            CallbackQueryHandler(
-                entregar_archivo_revisado_callback,
-                pattern=r"^revisar_entregar$",
+                recibir_documento_entrega,
             )
         )
 
@@ -11434,6 +10816,13 @@ def ejecutar_telegram():
 
         # 🔔 Alertas de vencimiento: comprobación cada hora.
         if app.job_queue is not None:
+            app.job_queue.run_repeating(
+                comprobar_alerta_membresia,
+                interval=3600,
+                first=15,
+                name="alertas_membresia",
+            )
+
             app.job_queue.run_repeating(
                 alertar_vencimientos_admin,
                 interval=3600,
