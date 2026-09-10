@@ -1962,6 +1962,184 @@ def resumen_tareas_atrasadas():
 
 
 
+
+# =========================================================
+# 🔎 CONTEXTO PARA REVISIÓN PREVIA DE TRABAJOS
+# =========================================================
+
+def _buscar_cmid_de_tarea(assignid, tarea=None):
+    """Obtiene el course-module id (cmid) real de una tarea."""
+    tarea = tarea or {}
+    for clave in ("cmid", "cmidnumber", "coursemoduleid"):
+        valor = tarea.get(clave)
+        if valor:
+            try:
+                return int(valor)
+            except Exception:
+                pass
+
+    courseid = tarea.get("courseid")
+    if not courseid:
+        return None
+
+    try:
+        contenidos = obtener_contenido_curso(int(courseid))
+        if not isinstance(contenidos, list):
+            return None
+        for seccion in contenidos:
+            for modulo in (seccion.get("modules", []) or []):
+                try:
+                    if int(modulo.get("instance", 0)) == int(assignid) and str(modulo.get("modname", "")) == "assign":
+                        if modulo.get("id"):
+                            return int(modulo["id"])
+                except Exception:
+                    continue
+    except Exception as error:
+        print("⚠️ No pude localizar cmid de la tarea:", error)
+    return None
+
+
+def obtener_rubrica_tarea(assignid, tarea=None):
+    """
+    Consulta la definición de calificación avanzada de Moodle.
+    No inventa una rúbrica: si Moodle no la expone para el alumno,
+    devuelve disponible=False.
+    """
+    tarea = tarea or {}
+    cmid = _buscar_cmid_de_tarea(assignid, tarea)
+    if not cmid:
+        return {"disponible": False, "motivo": "No pude identificar el módulo de Moodle."}
+
+    try:
+        modulo = moodle_api(
+            "core_course_get_course_module",
+            {"cmid": int(cmid)},
+        )
+    except Exception as error:
+        print("⚠️ Error consultando módulo Moodle:", error)
+        modulo = {}
+
+    areas = []
+    cm = modulo.get("cm", {}) if isinstance(modulo, dict) else {}
+    for item in (cm.get("advancedgrading", []) or []):
+        if isinstance(item, dict):
+            areas.append(item)
+
+    # En Moodle el área habitual de Assignment para la calificación
+    # avanzada es "submissions". Usamos la información real del módulo
+    # cuando está disponible y solo después probamos ese nombre estándar.
+    area_names = []
+    for item in areas:
+        area = item.get("area")
+        if area:
+            area_names.append(str(area))
+    if "submissions" not in area_names:
+        area_names.append("submissions")
+
+    ultimo_error = None
+    for area in area_names:
+        for parametros in (
+            {"cmids": [int(cmid)], "areaname": area, "activeonly": 1},
+            {"cmids": [int(cmid)], "areaname": area},
+        ):
+            try:
+                datos = moodle_api("core_grading_get_definitions", parametros)
+                if not isinstance(datos, dict) or datos.get("error"):
+                    ultimo_error = datos
+                    continue
+                definiciones = datos.get("definitions", []) or []
+                if definiciones:
+                    return {
+                        "disponible": True,
+                        "cmid": cmid,
+                        "area": area,
+                        "metodo": next((x.get("method") for x in areas if x.get("area") == area), None),
+                        "definiciones": definiciones,
+                        "raw": datos,
+                    }
+            except Exception as error:
+                ultimo_error = error
+
+    return {
+        "disponible": False,
+        "cmid": cmid,
+        "motivo": "Moodle no expuso una rúbrica/lista de calificación disponible para esta cuenta.",
+        "detalle": str(ultimo_error)[:1000] if ultimo_error else "sin definición activa",
+    }
+
+
+def obtener_contexto_revision_tarea(assignid):
+    """Reúne únicamente información académica publicada/visible para el alumno."""
+    tarea = None
+    try:
+        todas = buscar_tareas_detalladas()
+        if isinstance(todas, list):
+            for item in todas:
+                try:
+                    if int(item.get("id", 0)) == int(assignid):
+                        tarea = dict(item)
+                        break
+                except Exception:
+                    continue
+    except Exception as error:
+        print("⚠️ No pude localizar tarea para revisión:", error)
+
+    if not tarea:
+        return {"ok": False, "error": "No encontré la actividad en Moodle."}
+
+    detalle = detalle_tarea(tarea)
+    rubrica = obtener_rubrica_tarea(assignid, tarea)
+
+    archivos = []
+    for archivo in (detalle.get("archivos", []) or []):
+        if not isinstance(archivo, dict):
+            continue
+        archivos.append({
+            "filename": archivo.get("filename") or archivo.get("name"),
+            "url": archivo.get("fileurl") or archivo.get("url"),
+            "mimetype": archivo.get("mimetype") or archivo.get("mimetype"),
+        })
+
+    materiales_relacionados = []
+    courseid = tarea.get("courseid")
+    if courseid:
+        try:
+            contenidos = obtener_contenido_curso(int(courseid))
+            if isinstance(contenidos, list):
+                for seccion in contenidos:
+                    mods = seccion.get("modules", []) or []
+                    pertenece = any(
+                        isinstance(mod, dict) and int(mod.get("instance", 0) or 0) == int(assignid)
+                        for mod in mods
+                    )
+                    if not pertenece:
+                        continue
+                    for mod in mods:
+                        if not isinstance(mod, dict):
+                            continue
+                        if str(mod.get("modname", "")) == "assign" and int(mod.get("instance", 0) or 0) == int(assignid):
+                            continue
+                        materiales_relacionados.append({
+                            "nombre": mod.get("name", ""),
+                            "tipo": mod.get("modname", ""),
+                            "url": mod.get("url", ""),
+                            "descripcion": _limpiar_html(mod.get("description", "") or ""),
+                        })
+                    break
+        except Exception as error:
+            print("⚠️ No pude obtener materiales relacionados:", error)
+
+    return {
+        "ok": True,
+        "tarea": tarea,
+        "detalle": detalle,
+        "archivos_relacionados": archivos,
+        "materiales_relacionados": materiales_relacionados,
+        "rubrica": rubrica if rubrica.get("disponible") else {},
+        "criterios": [],
+        "rubrica_disponible": bool(rubrica.get("disponible")),
+    }
+
 # =========================================================
 # 📤 ENTREGA DIRECTA DE ARCHIVOS A MOODLE
 # =========================================================
