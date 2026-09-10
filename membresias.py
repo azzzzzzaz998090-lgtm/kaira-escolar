@@ -35,7 +35,8 @@ def inicializar():
             estado TEXT NOT NULL DEFAULT 'pendiente',
             metodo_pago TEXT DEFAULT '',
             notas TEXT DEFAULT '',
-            tipo_membresia TEXT DEFAULT ''
+            tipo_membresia TEXT DEFAULT '',
+            prueba_usada INTEGER DEFAULT 0
         )
     """)
     con.commit()
@@ -78,6 +79,11 @@ def asegurar_columnas():
             "ALTER TABLE membresias ADD COLUMN tipo_membresia TEXT DEFAULT ''"
         )
 
+    if "prueba_usada" not in columnas:
+        con.execute(
+            "ALTER TABLE membresias ADD COLUMN prueba_usada INTEGER DEFAULT 0"
+        )
+
     con.commit()
     con.close()
 
@@ -93,28 +99,43 @@ def crear_o_actualizar_usuario(
     apellido="",
     username="",
 ):
+    """
+    Crea el perfil de membresía. Para un usuario nuevo autorizado,
+    inicia automáticamente una prueba gratuita de 5 días.
+    La prueba se usa una sola vez y no genera un registro de venta.
+    """
     uid = int(telegram_user_id)
     con = conectar()
 
     fila = con.execute(
-        "SELECT telegram_user_id FROM membresias WHERE telegram_user_id = ?",
+        "SELECT * FROM membresias WHERE telegram_user_id = ?",
         (uid,)
     ).fetchone()
 
     if fila is None:
+        inicio = ahora_iso()
+        vencimiento = (
+            datetime.now(ZONA) + timedelta(days=5)
+        ).isoformat(timespec="seconds")
+
         con.execute("""
             INSERT INTO membresias (
                 telegram_user_id, nombre, apellido, username,
-                fecha_registro, estado
-            ) VALUES (?, ?, ?, ?, ?, 'pendiente')
+                fecha_registro, fecha_inicio, fecha_vencimiento,
+                precio, pagado, estado, metodo_pago, notas,
+                tipo_membresia, prueba_usada
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, 'activa', '', '', 'Prueba', 1)
         """, (
             uid,
             (nombre or "").strip(),
             (apellido or "").strip(),
             (username or "").strip(),
-            ahora_iso(),
+            inicio,
+            inicio,
+            vencimiento,
         ))
     else:
+        # Nunca reiniciar una prueba existente. Solo actualizar datos básicos.
         con.execute("""
             UPDATE membresias
             SET nombre = ?, apellido = ?, username = ?
@@ -592,6 +613,12 @@ def registrar_membresia(
             "ADD COLUMN tipo_membresia TEXT DEFAULT ''"
         )
 
+    if "prueba_usada" not in columnas:
+        con.execute(
+            "ALTER TABLE membresias "
+            "ADD COLUMN prueba_usada INTEGER DEFAULT 0"
+        )
+
     con.execute(
         """
         INSERT INTO membresias (
@@ -606,9 +633,10 @@ def registrar_membresia(
             estado,
             metodo_pago,
             notas,
-            tipo_membresia
+            tipo_membresia,
+            prueba_usada
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(telegram_user_id) DO UPDATE SET
             nombre=excluded.nombre,
             apellido=excluded.apellido,
@@ -619,7 +647,8 @@ def registrar_membresia(
             estado=excluded.estado,
             metodo_pago=excluded.metodo_pago,
             notas=excluded.notas,
-            tipo_membresia=excluded.tipo_membresia
+            tipo_membresia=excluded.tipo_membresia,
+            prueba_usada=excluded.prueba_usada
         """,
         (
             uid,
@@ -634,6 +663,7 @@ def registrar_membresia(
             (metodo_pago or "").strip(),
             (notas or "").strip(),
             tipo_membresia,
+            1 if tipo_membresia == "Prueba" else 1,
         ),
     )
 
@@ -1026,6 +1056,13 @@ def actualizar_estados():
 
         if dias < 0:
             nuevo = "vencida"
+            # El vencimiento termina el derecho de uso; el historial de pago
+            # se conserva por separado. La ficha operativa pasa a no pagada.
+            con.execute(
+                "UPDATE membresias SET estado = ?, pagado = 0 WHERE telegram_user_id = ?",
+                (nuevo, fila["telegram_user_id"])
+            )
+            continue
         elif int(fila["pagado"] or 0) == 0:
             nuevo = "pendiente"
         else:
@@ -1039,6 +1076,48 @@ def actualizar_estados():
     con.commit()
     con.close()
 
+
+
+def limpiar_usuarios_inactivos(dias=30):
+    """
+    Elimina únicamente fichas operativas que llevan al menos `dias`
+    vencidas/no pagadas. El historial_pagos nunca se elimina aquí.
+    Devuelve la lista de IDs eliminados.
+    """
+    try:
+        dias = max(1, int(dias))
+    except Exception:
+        dias = 30
+
+    ahora = datetime.now(ZONA)
+    limite = ahora - timedelta(days=dias)
+    eliminados = []
+
+    con = conectar()
+    filas = con.execute("""
+        SELECT telegram_user_id, fecha_vencimiento, pagado, estado
+        FROM membresias
+    """).fetchall()
+
+    for fila in filas:
+        fecha = parsear_fecha_local(fila["fecha_vencimiento"])
+        if not fecha or fecha >= limite:
+            continue
+
+        # Solo se limpian cuentas ya vencidas y que no están pagadas.
+        if int(fila["pagado"] or 0) != 0:
+            continue
+
+        uid = int(fila["telegram_user_id"])
+        con.execute(
+            "DELETE FROM membresias WHERE telegram_user_id = ?",
+            (uid,)
+        )
+        eliminados.append(uid)
+
+    con.commit()
+    con.close()
+    return eliminados
 
 
 def resumen_admin(
@@ -1135,10 +1214,7 @@ def acceso_permitido(telegram_user_id):
 
     estado = usuario.get("estado", "pendiente")
 
-    if estado == "vencida":
-        return False
-
-    return True
+    return estado == "activa"
 
 
 def obtener_alertas_vencimiento(dias_max=7):
