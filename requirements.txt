@@ -7,3 +7,4 @@ pypdf
 python-pptx
 python-docx
 openpyxl
+reportlab
