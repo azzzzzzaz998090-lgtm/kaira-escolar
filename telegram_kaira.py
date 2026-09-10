@@ -160,151 +160,77 @@ async def admin_decision_acceso_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+    """Atiende AUTORIZAR/DENEGAR. AUTORIZAR solo deja pendiente el plan."""
     query = update.callback_query
-
     if not query or not query.from_user:
         return
-
     if not usuario_admin(query.from_user.id):
-        await query.answer(
-            "No tienes permiso.",
-            show_alert=True,
-        )
+        await query.answer("No tienes permiso.", show_alert=True)
         return
-
     await query.answer()
-
     data = query.data or ""
-
     try:
-        accion, user_id_text = data.split(
-            ":",
-            1,
-        )
+        accion, user_id_text = data.split(":", 1)
         user_id = int(user_id_text)
     except Exception:
-        await query.edit_message_text(
-            "❌ Solicitud inválida."
-        )
+        await query.edit_message_text("❌ Solicitud inválida.")
         return
-
-    solicitud = cargar_solicitudes_acceso().get(
-        str(user_id)
-    )
-
+    solicitud = cargar_solicitudes_acceso().get(str(user_id))
     if not solicitud:
-        await query.edit_message_text(
-            "ℹ️ Esta solicitud ya fue atendida."
-        )
+        await query.edit_message_text("ℹ️ Esta solicitud ya fue atendida.")
         return
-
     nombre = " ".join(
-        x for x in (
-            solicitud.get("first_name", ""),
-            solicitud.get("last_name", ""),
-        )
-        if x
+        x for x in (solicitud.get("first_name", ""), solicitud.get("last_name", "")) if x
     ).strip() or "@usuario"
-
     if accion == "solicitud_rechazar":
         quitar_solicitud_acceso(user_id)
-
+        quitar_autorizacion_pendiente(query.from_user.id)
         try:
             await context.bot.send_message(
                 chat_id=user_id,
                 text=(
-                    "❌ <b>Tu solicitud de acceso a KAIRA "
-                    "no fue aprobada.</b>\n\n"
-                    "Si necesitas acceso, puedes solicitarlo "
-                    "nuevamente más adelante."
+                    "❌ <b>Solicitud no aprobada.</b>\n\n"
+                    "Tu solicitud de acceso a KAIRA fue rechazada.\n"
+                    "Puedes solicitar acceso nuevamente más adelante."
                 ),
                 parse_mode="HTML",
             )
         except Exception as error:
-            print(
-                "⚠️ No pude avisar rechazo:",
-                error
-            )
-
+            print("⚠️ No pude avisar rechazo:", error)
         await query.edit_message_text(
             "❌ <b>SOLICITUD RECHAZADA</b>\n\n"
-            f"👤 {nombre}\n"
+            f"👤 {html.escape(nombre)}\n"
             f"🆔 <code>{user_id}</code>",
             parse_mode="HTML",
         )
         return
+    if accion != "solicitud_autorizar":
+        await query.edit_message_text("❌ Acción no reconocida.")
+        return
+    # IMPORTANTE: NO agregar al usuario autorizado todavía.
+    guardar_autorizacion_pendiente(query.from_user.id, user_id, nombre)
+    try:
+        from membresias import listar_precios_planes
+        precios = listar_precios_planes()
+    except Exception:
+        precios = {}
+    await query.edit_message_text(
+        "🟡 <b>AUTORIZACIÓN PENDIENTE DE PLAN</b>\n\n"
+        f"👤 {html.escape(nombre)}\n"
+        f"🆔 <code>{user_id}</code>\n\n"
+        "La autorización fue aceptada, pero <b>todavía NO tiene acceso</b>.\n"
+        "Ahora selecciona qué activar respondiendo en este chat:\n\n"
+        "🎁 <b>Prueba</b> — 5 días · GRATIS\n"
+        f"📅 <b>Semanal</b> — ${float(precios.get('Semanal', 0) or 0):.2f}\n"
+        f"📆 <b>Mensual</b> — ${float(precios.get('Mensual', 0) or 0):.2f}\n"
+        f"📊 <b>Trimestral</b> — ${float(precios.get('Trimestral', 0) or 0):.2f}\n"
+        f"🗓️ <b>Semestral</b> — ${float(precios.get('Semestral', 0) or 0):.2f}\n"
+        f"📚 <b>Anual</b> — ${float(precios.get('Anual', 0) or 0):.2f}\n\n"
+        "Ejemplo: <code>Prueba</code> o <code>Mensual</code>",
+        parse_mode="HTML",
+    )
+    quitar_solicitud_acceso(user_id)
 
-    if accion == "solicitud_autorizar":
-        guardar_autorizacion_pendiente(
-            query.from_user.id,
-            user_id,
-            nombre,
-        )
-
-        usuarios = cargar_usuarios_autorizados()
-        bloqueados = cargar_ids_bloqueados()
-
-        bloqueados.discard(user_id)
-
-        registro = usuarios.get(
-            user_id,
-            {
-                "telegram_user_id": user_id,
-                "first_name": solicitud.get(
-                    "first_name",
-                    "",
-                ),
-                "last_name": solicitud.get(
-                    "last_name",
-                    "",
-                ),
-                "username": solicitud.get(
-                    "username",
-                    "",
-                ),
-                "telegram_first_name": solicitud.get(
-                    "first_name",
-                    "",
-                ),
-                "telegram_last_name": solicitud.get(
-                    "last_name",
-                    "",
-                ),
-                "autorizado_en": "",
-                "ultimo_acceso": "",
-            },
-        )
-
-        usuarios[user_id] = registro
-
-        guardar_usuarios_autorizados(
-            usuarios
-        )
-        guardar_ids_bloqueados(
-            bloqueados
-        )
-
-        try:
-            from membresias import listar_precios_planes
-            precios = listar_precios_planes()
-        except Exception:
-            precios = {}
-
-        await query.edit_message_text(
-            "✅ <b>AUTORIZACIÓN ACEPTADA</b>\n\n"
-            f"👤 {nombre}\n"
-            f"🆔 <code>{user_id}</code>\n\n"
-            "Selecciona el plan respondiendo en este chat:\n\n"
-            f"📅 Semanal — <b>${precios.get('Semanal', 0):.2f}</b>\n"
-            f"📆 Mensual — <b>${precios.get('Mensual', 0):.2f}</b>\n"
-            f"📊 Trimestral — <b>${precios.get('Trimestral', 0):.2f}</b>\n"
-            f"🗓️ Semestral — <b>${precios.get('Semestral', 0):.2f}</b>\n"
-            f"📚 Anual — <b>${precios.get('Anual', 0):.2f}</b>\n\n"
-            "Ejemplo: <code>Mensual</code>",
-            parse_mode="HTML",
-        )
-
-        quitar_solicitud_acceso(user_id)
 
 # =========================================================
 # CONFIGURACIÓN
@@ -3960,258 +3886,135 @@ async def procesar_seleccion_plan_autorizacion(
     context: ContextTypes.DEFAULT_TYPE,
     texto,
 ):
-    """
-    Completa /autorizar ID cuando el administrador responde
-    con el plan de membresía.
-    """
+    """Completa la autorización pendiente del administrador.
 
+    AUTORIZAR no concede acceso. El acceso se activa únicamente después
+    de elegir Prueba o un plan pagado.
+    """
     if not update.effective_user or not update.message:
         return False
-
-    admin_id = (
-        update.effective_user.id
-    )
-
-    if not usuario_admin(
-        admin_id
-    ):
+    admin_id = int(update.effective_user.id)
+    if not usuario_admin(admin_id):
         return False
-
-    pendiente = obtener_autorizacion_pendiente(
-        admin_id
-    )
-
+    pendiente = obtener_autorizacion_pendiente(admin_id)
     if not pendiente:
         return False
-
-    texto_limpio = (
-        str(texto)
-        .strip()
-        .lower()
-    )
-
+    texto_limpio = str(texto or "").strip().lower()
     equivalencias = {
-        "semanal": "Semanal",
-        "semana": "Semanal",
-        "mensual": "Mensual",
-        "mes": "Mensual",
-        "trimestral": "Trimestral",
-        "trimestre": "Trimestral",
-        "semestral": "Semestral",
-        "semestre": "Semestral",
-        "anual": "Anual",
-        "año": "Anual",
-        "ano": "Anual",
+        "prueba": "Prueba", "prueba gratis": "Prueba",
+        "prueba gratuita": "Prueba", "gratis": "Prueba",
+        "gratuita": "Prueba", "5 dias": "Prueba", "5 días": "Prueba",
+        "semanal": "Semanal", "semana": "Semanal",
+        "mensual": "Mensual", "mes": "Mensual",
+        "trimestral": "Trimestral", "trimestre": "Trimestral",
+        "semestral": "Semestral", "semestre": "Semestral",
+        "anual": "Anual", "año": "Anual", "ano": "Anual",
     }
-
-    plan = equivalencias.get(
-        texto_limpio
-    )
-
+    plan = equivalencias.get(texto_limpio)
     if not plan:
         await update.message.reply_text(
-            "⚠️ No reconocí ese plan.\n\n"
-            "Responde con:\n"
-            "• Semanal\n"
-            "• Mensual\n"
-            "• Trimestral\n"
-            "• Semestral\n"
-            "• Anual"
+            "⚠️ No reconocí esa opción.\n\n"
+            "Responde con una de estas opciones:\n"
+            "🎁 Prueba\n📅 Semanal\n📆 Mensual\n"
+            "📊 Trimestral\n🗓️ Semestral\n📚 Anual"
         )
         return True
-
-    usuario_id = int(
-        pendiente["usuario_id"]
-    )
-
+    usuario_id = int(pendiente["usuario_id"])
+    if usuario_id == _id_admin():
+        quitar_autorizacion_pendiente(admin_id)
+        await update.message.reply_text("⛔ Ese ID es el administrador principal.")
+        return True
     usuarios = cargar_usuarios_autorizados()
     bloqueados = cargar_ids_bloqueados()
-
-    if usuario_id == _id_admin():
-        quitar_autorizacion_pendiente(
-            admin_id
-        )
-        await update.message.reply_text(
-            "⛔ Ese ID es el administrador principal."
-        )
-        return True
-
-    bloqueados.discard(
-        usuario_id
-    )
-
-    # Si ya estaba autorizado, conserva sus datos de Telegram.
-    registro = usuarios.get(
-        usuario_id,
-        {
-            "telegram_user_id": usuario_id,
-            "first_name": pendiente.get("nombre", ""),
-            "last_name": "",
-            "username": "",
-            "telegram_first_name": pendiente.get("nombre", ""),
-            "telegram_last_name": "",
-            "autorizado_en": "",
-            "ultimo_acceso": "",
-        }
-    )
-
-    # Actualizar perfil de Telegram si podemos.
-    try:
-        chat = await context.bot.get_chat(
-            usuario_id
-        )
-
-        registro["first_name"] = (
-            getattr(
-                chat,
-                "first_name",
-                ""
-            ) or registro.get("first_name", "")
-        ).strip()
-
-        registro["last_name"] = (
-            getattr(
-                chat,
-                "last_name",
-                ""
-            ) or registro.get("last_name", "")
-        ).strip()
-
-        registro["username"] = (
-            getattr(
-                chat,
-                "username",
-                ""
-            ) or registro.get("username", "")
-        ).strip()
-
-    except Exception as error:
-        print(
-            "⚠️ No pude obtener perfil Telegram:",
-            error
-        )
-
-    registro["telegram_user_id"] = usuario_id
-    registro["autorizado_en"] = (
-        registro.get("autorizado_en")
-        or datetime.now().isoformat()
-    )
-
-    usuarios[usuario_id] = registro
-
-    guardar_usuarios_autorizados(
-        usuarios
-    )
-
-    guardar_ids_bloqueados(
-        bloqueados
-    )
-
-    nombre = nombre_visible_usuario(
-        registro
-    )
-
-    # Crear la membresía desde el momento de autorización.
+    registro = usuarios.get(usuario_id, {
+        "telegram_user_id": usuario_id,
+        "first_name": pendiente.get("nombre", ""),
+        "last_name": "", "username": "", "autorizado_en": "",
+        "ultimo_acceso": "", "prueba_usada": False,
+    })
     try:
         from membresias import (
-            registrar_membresia,
+            registrar_membresia, listar_precios_planes, obtener_usuario,
+            fecha_hora_actual_local, fecha_iso_local,
+            calcular_fecha_vencimiento,
         )
-
-        precio = __import__(
-            "membresias"
-        ).obtener_precio_plan(
-            plan
-        )
-
-        inicio = __import__(
-            "membresias"
-        ).fecha_iso_local(
-            __import__(
-                "membresias"
-            ).fecha_hora_actual_local()
-        )
-
-        vencimiento = __import__(
-            "membresias"
-        ).calcular_fecha_vencimiento(
-            inicio,
-            plan,
-        )
-
-        registrar_membresia(
-            usuario_id,
-            registro.get("first_name", ""),
-            registro.get("last_name", ""),
-            inicio,
-            vencimiento,
-            precio,
-            1,
-            "",
-            "",
-            "activa",
-            plan,
-        )
-
-    except Exception as error:
-
-        print(
-            "⚠️ No pude crear la membresía automáticamente:",
-            error
-        )
-
-        quitar_autorizacion_pendiente(
-            admin_id
-        )
-
+        ahora = fecha_hora_actual_local()
+        inicio = fecha_iso_local(ahora)
+        if plan == "Prueba":
+            mem_existente = obtener_usuario(usuario_id)
+            prueba_usada = bool(registro.get("prueba_usada", False))
+            if mem_existente and int(mem_existente.get("prueba_usada", 0) or 0) == 1:
+                prueba_usada = True
+            if prueba_usada:
+                await update.message.reply_text(
+                    "❌ Ese usuario ya utilizó su prueba gratuita de 5 días.\n"
+                    "Debes seleccionar un plan de pago."
+                )
+                return True
+            vencimiento = fecha_iso_local(ahora + timedelta(days=5))
+            precio = 0.0
+            registrar_membresia(
+                usuario_id, registro.get("first_name", pendiente.get("nombre", "")),
+                registro.get("last_name", ""), inicio, vencimiento, precio, 1,
+                "Prueba gratuita", "Prueba gratuita de 5 días", "activa", "Prueba"
+            )
+            registro["prueba_usada"] = True
+        else:
+            precios = listar_precios_planes()
+            precio = float(precios.get(plan, 0) or 0)
+            vencimiento = calcular_fecha_vencimiento(inicio, plan)
+            registrar_membresia(
+                usuario_id, registro.get("first_name", pendiente.get("nombre", "")),
+                registro.get("last_name", ""), inicio, vencimiento, precio, 1,
+                "Autorizado por administrador", "Membresía activada por administrador",
+                "activa", plan
+            )
+            registro["prueba_usada"] = True
+        registro["telegram_user_id"] = usuario_id
+        registro["autorizado_en"] = datetime.now().isoformat()
+        usuarios[usuario_id] = registro
+        guardar_usuarios_autorizados(usuarios)
+        bloqueados.discard(usuario_id)
+        guardar_ids_bloqueados(bloqueados)
+        quitar_autorizacion_pendiente(admin_id)
+        quitar_solicitud_acceso(usuario_id)
+        mem = obtener_usuario(usuario_id)
+        fecha_vencimiento = mem.get("fecha_vencimiento", vencimiento) if mem else vencimiento
+        nombre = nombre_visible_usuario(registro)
         await update.message.reply_text(
-            "❌ El usuario fue autorizado, "
-            "pero ocurrió un problema creando la membresía."
-        )
-
-        return True
-
-    quitar_autorizacion_pendiente(
-        admin_id
-    )
-
-    # Aviso al administrador.
-    try:
-        from membresias import listar_precios_planes
-
-        precios = listar_precios_planes()
-
-        await update.message.reply_text(
-            "✅ <b>USUARIO REGISTRADO</b>\n\n"
-            f"👤 {nombre}\n"
-            f"🆔 {usuario_id}\n\n"
-            f"📦 Plan: <b>{plan}</b>\n"
-            f"💰 Precio: <b>${precios.get(plan, 0):.2f}</b>\n"
-            f"📅 Inicio: <b>{inicio}</b>\n"
-            f"⏳ Corte: <b>{vencimiento}</b>\n"
-            f"💳 Pago: <b>Pagado</b>\n\n"
-            "📩 Se enviaron las instrucciones al usuario.",
+            "✅ <b>ACCESO ACTIVADO</b>\n\n"
+            f"👤 {html.escape(nombre)}\n"
+            f"🆔 <code>{usuario_id}</code>\n"
+            f"📦 Plan: <b>{html.escape(plan)}</b>\n"
+            f"💰 Precio: <b>${float(precio):.2f}</b>\n"
+            f"⏳ Vence: <b>{html.escape(str(fecha_vencimiento))}</b>",
             parse_mode="HTML",
         )
-
-    except Exception:
+        try:
+            await context.bot.send_message(
+                chat_id=usuario_id,
+                text=(
+                    "🤖 <b>KAIRA</b>\n\n"
+                    f"Hola {html.escape(nombre)}.\n"
+                    "Tu acceso ya está activo.\n\n"
+                    f"🎫 Plan: <b>{html.escape(plan)}</b>\n"
+                    f"⏳ Válida hasta: <b>{html.escape(str(fecha_vencimiento))}</b>\n\n"
+                    "Selecciona una opción:"
+                ),
+                parse_mode="HTML",
+                reply_markup=teclado_menu_usuario(usuario_id),
+            )
+        except Exception as error:
+            print("⚠️ No pude enviar menú automático al usuario:", error)
+        return True
+    except Exception as error:
+        print("⚠️ Error activando acceso/membresía:", error)
         await update.message.reply_text(
-            "✅ Usuario registrado y membresía configurada."
+            "❌ No pude activar la membresía.\n"
+            "El usuario NO fue autorizado.\n"
+            "Revisa los registros de KAIRA antes de volver a intentarlo."
         )
-
-    enviado = await enviar_instrucciones_autorizacion(
-        context.bot,
-        usuario_id,
-        nombre
-    )
-
-    if not enviado:
-        await update.message.reply_text(
-            "⚠️ No pude enviarle el mensaje automáticamente. "
-            "Pídele que abra el chat con KAIRA y escriba /start."
-        )
-
-    return True
-
+        return True
 
 
 async def comando_cancelar_autorizacion(
@@ -4406,203 +4209,77 @@ async def admin_decision_acceso_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+    """Atiende AUTORIZAR/DENEGAR. AUTORIZAR solo deja pendiente el plan."""
     query = update.callback_query
-
     if not query or not query.from_user:
         return
-
-    if not usuario_admin(
-        query.from_user.id
-    ):
-        await query.answer(
-            "No tienes permiso.",
-            show_alert=True,
-        )
+    if not usuario_admin(query.from_user.id):
+        await query.answer("No tienes permiso.", show_alert=True)
         return
-
     await query.answer()
-
-    data = (
-        query.data or ""
-    )
-
+    data = query.data or ""
     try:
-        accion, user_id_text = data.split(
-            ":",
-            1,
-        )
-
-        user_id = int(
-            user_id_text
-        )
-
+        accion, user_id_text = data.split(":", 1)
+        user_id = int(user_id_text)
     except Exception:
-
-        await query.edit_message_text(
-            "❌ Solicitud inválida."
-        )
+        await query.edit_message_text("❌ Solicitud inválida.")
         return
-
-    solicitudes = cargar_solicitudes_acceso()
-    solicitud = solicitudes.get(
-        str(user_id)
-    )
-
+    solicitud = cargar_solicitudes_acceso().get(str(user_id))
     if not solicitud:
-
-        await query.edit_message_text(
-            "ℹ️ Esta solicitud ya fue atendida."
-        )
+        await query.edit_message_text("ℹ️ Esta solicitud ya fue atendida.")
         return
-
     nombre = " ".join(
-        x
-        for x in (
-            solicitud.get(
-                "first_name",
-                ""
-            ),
-            solicitud.get(
-                "last_name",
-                ""
-            ),
-        )
-        if x
-    ).strip()
-
-    if not nombre:
-        nombre = (
-            "@"
-            + (
-                solicitud.get(
-                    "username",
-                    ""
-                )
-                or "sin_username"
-            )
-        )
-
+        x for x in (solicitud.get("first_name", ""), solicitud.get("last_name", "")) if x
+    ).strip() or "@usuario"
     if accion == "solicitud_rechazar":
-
-        quitar_solicitud_acceso(
-            user_id
-        )
-
+        quitar_solicitud_acceso(user_id)
+        quitar_autorizacion_pendiente(query.from_user.id)
         try:
             await context.bot.send_message(
                 chat_id=user_id,
                 text=(
-                    "❌ <b>Tu solicitud de acceso a KAIRA "
-                    "no fue aprobada.</b>\n\n"
-                    "Si necesitas acceso, puedes volver a "
-                    "solicitarlo más adelante."
+                    "❌ <b>Solicitud no aprobada.</b>\n\n"
+                    "Tu solicitud de acceso a KAIRA fue rechazada.\n"
+                    "Puedes solicitar acceso nuevamente más adelante."
                 ),
                 parse_mode="HTML",
             )
         except Exception as error:
-            print(
-                "⚠️ No pude avisar rechazo al usuario:",
-                error
-            )
-
+            print("⚠️ No pude avisar rechazo:", error)
         await query.edit_message_text(
             "❌ <b>SOLICITUD RECHAZADA</b>\n\n"
-            f"👤 {nombre}\n"
+            f"👤 {html.escape(nombre)}\n"
             f"🆔 <code>{user_id}</code>",
             parse_mode="HTML",
         )
-
         return
-
-    if accion == "solicitud_autorizar":
-
-        # Guardar la misma estructura que utiliza /autorizar
-        # para que el siguiente mensaje del admin ("Mensual")
-        # complete el registro automáticamente.
-        guardar_autorizacion_pendiente(
-            query.from_user.id,
-            user_id,
-            nombre,
-        )
-
-        # Guardar/actualizar el perfil básico.
-        usuarios = cargar_usuarios_autorizados()
-        bloqueados = cargar_ids_bloqueados()
-
-        bloqueados.discard(
-            user_id
-        )
-
-        registro = usuarios.get(
-            user_id,
-            {
-                "telegram_user_id": user_id,
-                "first_name": solicitud.get(
-                    "first_name",
-                    ""
-                ),
-                "last_name": solicitud.get(
-                    "last_name",
-                    ""
-                ),
-                "username": solicitud.get(
-                    "username",
-                    ""
-                ),
-                "telegram_first_name": solicitud.get(
-                    "first_name",
-                    ""
-                ),
-                "telegram_last_name": solicitud.get(
-                    "last_name",
-                    ""
-                ),
-                "autorizado_en": "",
-                "ultimo_acceso": "",
-                "prueba_usada": False,
-            }
-        )
-
-        usuarios[user_id] = registro
-
-        guardar_usuarios_autorizados(
-            usuarios
-        )
-
-        guardar_ids_bloqueados(
-            bloqueados
-        )
-
+    if accion != "solicitud_autorizar":
+        await query.edit_message_text("❌ Acción no reconocida.")
+        return
+    # IMPORTANTE: NO agregar al usuario autorizado todavía.
+    guardar_autorizacion_pendiente(query.from_user.id, user_id, nombre)
+    try:
+        from membresias import listar_precios_planes
+        precios = listar_precios_planes()
+    except Exception:
         precios = {}
+    await query.edit_message_text(
+        "🟡 <b>AUTORIZACIÓN PENDIENTE DE PLAN</b>\n\n"
+        f"👤 {html.escape(nombre)}\n"
+        f"🆔 <code>{user_id}</code>\n\n"
+        "La autorización fue aceptada, pero <b>todavía NO tiene acceso</b>.\n"
+        "Ahora selecciona qué activar respondiendo en este chat:\n\n"
+        "🎁 <b>Prueba</b> — 5 días · GRATIS\n"
+        f"📅 <b>Semanal</b> — ${float(precios.get('Semanal', 0) or 0):.2f}\n"
+        f"📆 <b>Mensual</b> — ${float(precios.get('Mensual', 0) or 0):.2f}\n"
+        f"📊 <b>Trimestral</b> — ${float(precios.get('Trimestral', 0) or 0):.2f}\n"
+        f"🗓️ <b>Semestral</b> — ${float(precios.get('Semestral', 0) or 0):.2f}\n"
+        f"📚 <b>Anual</b> — ${float(precios.get('Anual', 0) or 0):.2f}\n\n"
+        "Ejemplo: <code>Prueba</code> o <code>Mensual</code>",
+        parse_mode="HTML",
+    )
+    quitar_solicitud_acceso(user_id)
 
-        try:
-            from membresias import (
-                listar_precios_planes
-            )
-            precios = listar_precios_planes()
-        except Exception:
-            pass
-
-        await query.edit_message_text(
-            "✅ <b>AUTORIZACIÓN ACEPTADA</b>\n\n"
-            f"👤 {nombre}\n"
-            f"🆔 <code>{user_id}</code>\n\n"
-            "Ahora selecciona el plan respondiendo a este chat:\n\n"
-            f"📅 Semanal — <b>${precios.get('Semanal', 0):.2f}</b>\n"
-            f"📆 Mensual — <b>${precios.get('Mensual', 0):.2f}</b>\n"
-            f"📊 Trimestral — <b>${precios.get('Trimestral', 0):.2f}</b>\n"
-            f"🗓️ Semestral — <b>${precios.get('Semestral', 0):.2f}</b>\n"
-            f"📚 Anual — <b>${precios.get('Anual', 0):.2f}</b>\n\n"
-            "Escribe, por ejemplo: <code>Mensual</code>\n"
-            "o usa /cancelar_autorizacion.",
-            parse_mode="HTML",
-        )
-
-        quitar_solicitud_acceso(
-            user_id
-        )
-
-        return
 
 async def comando_solicitar_acceso(
     update: Update,
