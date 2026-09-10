@@ -2,3 +2,4 @@ python-telegram-bot[job-queue]
 google-genai
 requests
 Flask
+psycopg2-binary
