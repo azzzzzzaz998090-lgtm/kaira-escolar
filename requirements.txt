@@ -3,3 +3,5 @@ google-genai
 requests
 Flask
 psycopg2-binary
+pypdf
+python-pptx
